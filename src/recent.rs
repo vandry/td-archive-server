@@ -340,8 +340,7 @@ impl RecentDatabase {
             self.newest_i.store(new_i, Ordering::Release);
             // Lock the fresh data. After this both readers and appenders are blocked!
             let mut fresh = self.fresh.write().await;
-            b.v = fresh.v.iter().map(|(_, f)| f.clone()).collect();
-            fresh.v = boxcar::Vec::new();
+            b.v = std::mem::take(&mut fresh.v).into_iter().collect();
             b.t0 = fresh.t0.swap(0, Ordering::SeqCst);
             b.t1 = fresh.t1.swap(0, Ordering::SeqCst);
         }
