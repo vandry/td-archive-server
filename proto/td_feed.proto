@@ -1,0 +1,42 @@
+syntax = "proto2";
+
+package openraildata;
+
+import "google/protobuf/timestamp.proto";
+
+message TDQuery {
+  // Timestamps are ignored for live feed queries.
+  optional google.protobuf.Timestamp from_timestamp = 1;
+  optional google.protobuf.Timestamp to_timestamp = 2;
+
+  // No entries: query all. One or more entry are ORed.
+  repeated string area_id = 3;
+
+  // No entries: query all. One or more entry are ORed.
+  repeated string description = 4;
+}
+
+message TDFrame {
+  optional google.protobuf.Timestamp timestamp = 1;
+
+  // https://wiki.openraildata.com/index.php?title=C_Class_Messages
+
+  // Alphanumeric code representing the TD area that the message originates from.
+  // https://wiki.openraildata.com/index.php?title=List_of_Train_Describers
+  optional string area_id = 2;
+
+  // Train description
+  // Four-letter alphanumeric code representing the headcode or description of the train.
+  optional string description = 3;
+
+  // Berths: https://wiki.openraildata.com/index.php?title=TD_Berths
+
+  // Populated for Step (CA) and Cancel (CB).
+  optional string from_berth = 4;
+  // Populated for Step (CA) and Interpose (CC).
+  optional string to_berth = 5;
+}
+
+service TDFeed {
+  rpc Feed(TDQuery) returns (stream TDFrame) {}
+}

@@ -1,0 +1,38 @@
+syntax = "proto2";
+
+package openraildata;
+
+message TDIndexVector {
+  optional string key = 1;
+  optional bytes vector = 2;
+}
+
+message TDIndex {
+  // Size of the data file in bytes.
+  optional fixed32 data_length = 1;
+
+  // Offset into the data file where the serialised TDFrame protos live.
+  // The length of each serialised TDFrame is calculated as:
+  // - For all but the last: frame_offset[i+1] - frame_offset[i] - 4.
+  //   The 4 is because a 4-byte length appears before each frame.
+  //   The length isn't necessary for consuming the protos using the
+  //   index but ensures the data file is recoverable if the index is
+  //   missing.
+  // - For the last: data_length - frame_offset[i]
+  repeated fixed32 frame_offset = 2;
+
+  // In all TDIndexVector messages, each bit of the vector represents
+  // this many TDFrame entries. A 1 bit means the relevant key is present
+  // in at least 1 of the `vector_compression` consecutive messages at
+  // the position corresponding to `vector_compression` times less than
+  // the bit's position in the vector. A 0 bit means that none of those
+  // `vector_compression` consecutive messages do.
+  optional int32 vector_compression = 3;
+
+  repeated TDIndexVector area_ids = 4;
+  // Each of the 4 characters of descriptions is indexed separately.
+  repeated TDIndexVector description0 = 5;
+  repeated TDIndexVector description1 = 6;
+  repeated TDIndexVector description2 = 7;
+  repeated TDIndexVector description3 = 8;
+}
