@@ -21,7 +21,7 @@ use crate::preserve;
 // 3 days of 10-minute (6 per hour) buckets
 const NBUCKETS: usize = 6 * 24 * 3;
 const ROTATE_PERIOD: Duration = Duration::new(600, 0);
-const KEEP_TIME: i64 = 86400 * 2;
+const MAX_KEEP_TIME: i64 = 86400 * 2;
 
 fn mark(m: &mut HashMap<String, Vec<u8>>, k: &str, veclen: usize, bi: usize, bit: u8) {
     let v: &mut Vec<u8> = match m.get_mut(k) {
@@ -213,6 +213,10 @@ pub struct RecentDatabase {
 
     // Both fresh and the ring buffer
     count: AtomicUsize,
+
+    // The erliest time for which we will receive queries.
+    // Any earlier will go to the archive.
+    start_time: AtomicI64,
 }
 
 async fn get_live(
@@ -255,7 +259,12 @@ impl RecentDatabase {
             newest_i: AtomicUsize::new(0),
             b: array_init::array_init(|_| RwLock::new(Bucket::new())),
             count: AtomicUsize::new(0),
+            start_time: AtomicI64::new(0),
         }
+    }
+
+    pub fn set_boundary(&self, boundary: i64) {
+        self.start_time.store(boundary, Ordering::Release);
     }
 
     async fn submit(&self, frame: preserve::TdFrame) {
@@ -281,7 +290,16 @@ impl RecentDatabase {
     }
 
     async fn expire(&self) {
-        let expire_cutoff: i64 = now_time_t() - KEEP_TIME;
+        let mut expire_cutoff = self.start_time.load(Ordering::Acquire);
+        let max_expire_cutoff: i64 = now_time_t() - MAX_KEEP_TIME;
+        if expire_cutoff < max_expire_cutoff {
+            log::warn!(
+                "Expire cutoff {} is earlier than acceptable {}, capping to the latter",
+                expire_cutoff,
+                max_expire_cutoff
+            );
+            expire_cutoff = max_expire_cutoff;
+        }
         loop {
             let i = self.oldest_i.load(Ordering::Acquire);
             if i == self.newest_i.load(Ordering::Acquire) {
@@ -418,8 +436,8 @@ impl RecentDatabase {
         }
     }
 
-    pub fn start(self: Arc<Self>, dir: &Path) {
-        let socket_path = dir.join("collect_td_feed.sock");
+    pub fn start(self: Arc<Self>, socket_path: &Path) {
+        let socket_path = socket_path.to_owned();
         let self_live_getter = self.clone();
         tokio::spawn(async move {
             loop {

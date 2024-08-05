@@ -1,3 +1,5 @@
+use chrono::{TimeZone, Utc};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use crate::openraildata_pb::{TdFrame, TdQuery};
@@ -71,4 +73,13 @@ pub fn now_time_t() -> i64 {
         .as_secs()
         .try_into()
         .unwrap()
+}
+
+pub fn archive_filenames(db_path: &Path, day: i64) -> (PathBuf, PathBuf) {
+    let base = Utc.timestamp_opt(day, 0).unwrap().format("%Y%m%d");
+    let mut data_name = base.to_string();
+    data_name.push_str(".TDFrames");
+    let mut index_name = base.to_string();
+    index_name.push_str(".TDIndex.xz");
+    (db_path.join(data_name), db_path.join(index_name))
 }

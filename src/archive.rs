@@ -17,7 +17,7 @@ use tokio::time::{sleep, Duration};
 use tonic::Status;
 use xz::read::XzDecoder;
 
-use crate::common::{intersect, now_time_t, query_matches, union};
+use crate::common::{archive_filenames, intersect, now_time_t, query_matches, union};
 use crate::openraildata_pb::{TdFrame, TdIndex, TdIndexVector, TdQuery};
 use crate::preserve;
 
@@ -67,14 +67,9 @@ impl Drop for IndexReader {
 
 impl IndexReader {
     fn load(dir: &Path, day: i64) -> io::Result<Self> {
-        let base = Utc.timestamp_opt(day, 0).unwrap().format("%Y%m%d");
-        let mut data_name = base.to_string();
-        data_name.push_str(".TDFrames");
-        let mut index_name = base.to_string();
-        index_name.push_str(".TDIndex.xz");
-
-        let mut index = read_index(&dir.join(index_name))?;
-        let datafile = File::open(dir.join(data_name))?;
+        let (data_name, index_name) = archive_filenames(dir, day);
+        let mut index = read_index(&index_name)?;
+        let datafile = File::open(data_name)?;
         let map = unsafe { MmapOptions::new().map(&datafile) }?;
 
         let data_length: usize = index.data_length.unwrap_or_default().try_into().unwrap();
@@ -266,9 +261,9 @@ pub struct IndexRepo {
 }
 
 impl IndexRepo {
-    pub fn new(dir: PathBuf) -> Self {
+    pub fn new(dir: &Path) -> Self {
         Self {
-            dir,
+            dir: dir.to_owned(),
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
         }
     }
