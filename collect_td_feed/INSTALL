@@ -1,0 +1,6 @@
+make
+docker build -t vandry/collect_td_feed . --network=host
+docker push vandry/collect_td_feed
+kubectl create secret generic networkrail.credentials --from-file=credentials=$HOME/.networkrail.credentials
+kubectl create secret generic s3.credentials --from-file=credentials=$HOME/.aws/credentials
+kubectl apply -f k8s.yaml
