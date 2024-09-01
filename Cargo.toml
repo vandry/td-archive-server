@@ -15,10 +15,11 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
 lru = "0.12"
 memmap = "0.7"
+openssl = { version = "0.10", features = ["vendored"] }  # for musl build
 prost = "0.11"
 prost-types = "0.11"
 regex = "1.10"
-tempfile = "3.10"
+rust-s3 = "0.35"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = "0.8"

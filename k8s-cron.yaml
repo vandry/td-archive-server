@@ -1,0 +1,30 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: mktdarchive
+spec:
+  schedule: "30 13,15 * * *"
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: mktdarchive
+            image: vandry/td_feed_archive
+            command:
+            - "/mktdarchive"
+            - "https://sos-ch-dk-2.exo.io"
+            - "ch-dk-2"
+            - "td-feed-spool"
+            - "td-archive"
+            volumeMounts:
+              - name: s3-credentials
+                readOnly: true
+                mountPath: "/root/.aws"
+          volumes:
+            - name: s3-credentials
+              secret:
+                secretName: s3.credentials
+          restartPolicy: OnFailure
+      backoffLimit: 4
