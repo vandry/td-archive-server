@@ -151,6 +151,29 @@ async fn build(
         None => (0, 0),
     });
 
+    // Dedup
+    let mut previous_timestamp = (0, 0);
+    let mut frames_with_previous_timestamp: Vec<&[u8]> = Vec::new();
+    frames.retain(|(ser, m)| {
+        let this_timestamp = match m.timestamp {
+            Some(ref ts) => (ts.seconds, ts.nanos),
+            None => (0, 0),
+        };
+        if this_timestamp != previous_timestamp {
+            // When the timestamp moves forward we no longer need to check
+            // for duplicates going back before that.
+            frames_with_previous_timestamp.clear();
+            previous_timestamp = this_timestamp;
+        }
+        let ret = frames_with_previous_timestamp
+            .iter()
+            .filter(|prev_ser| *prev_ser == ser)
+            .next()
+            .is_none();
+        frames_with_previous_timestamp.push(ser);
+        ret
+    });
+
     let mut index = TdIndex {
         vector_compression: Some(vector_compression.try_into().unwrap()),
         ..Default::default()
