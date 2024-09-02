@@ -1,5 +1,6 @@
 use async_stream::stream;
 use chrono::{TimeZone, Utc};
+use futures::future::join_all;
 use futures::Stream;
 use lru::LruCache;
 use memmap::{Mmap, MmapOptions};
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+use tokio::sync::OnceCell;
 use tokio::time::{sleep, Duration};
 use tonic::Status;
 use xz::read::XzDecoder;
@@ -257,7 +259,7 @@ enum IndexRepoEntry {
 
 pub struct IndexRepo {
     dir: PathBuf,
-    cache: Mutex<LruCache<i64, IndexRepoEntry>>,
+    cache: Mutex<LruCache<i64, Arc<OnceCell<IndexRepoEntry>>>>,
 }
 
 impl IndexRepo {
@@ -268,20 +270,29 @@ impl IndexRepo {
         }
     }
 
-    fn get(&self, day: i64) -> Option<Arc<IndexReader>> {
-        match self.cache.lock().unwrap().get_or_insert(day, || {
-            match IndexReader::load(&self.dir, day) {
-                Ok(r) => IndexRepoEntry::Entry(Arc::new(r)),
-                Err(e) => {
-                    log::error!(
-                        "Unable to load data for {}: {}",
-                        Utc.timestamp_opt(day, 0).unwrap().format("%Y-%m-%d"),
-                        e
-                    );
-                    IndexRepoEntry::Missing(Instant::now())
+    async fn get(&self, day: i64) -> Option<Arc<IndexReader>> {
+        let entry = self
+            .cache
+            .lock()
+            .unwrap()
+            .get_or_insert(day, || Arc::new(OnceCell::new()))
+            .clone();
+        match entry
+            .get_or_init(|| async {
+                match IndexReader::load(&self.dir, day) {
+                    Ok(r) => IndexRepoEntry::Entry(Arc::new(r)),
+                    Err(e) => {
+                        log::error!(
+                            "Unable to load data for {}: {}",
+                            Utc.timestamp_opt(day, 0).unwrap().format("%Y-%m-%d"),
+                            e
+                        );
+                        IndexRepoEntry::Missing(Instant::now())
+                    }
                 }
-            }
-        }) {
+            })
+            .await
+        {
             IndexRepoEntry::Entry(r) => {
                 r.last_used.store(now_time_t(), Ordering::Release);
                 Some(r.clone())
@@ -315,8 +326,8 @@ impl IndexRepo {
         let mut count = 0;
         let mut memory_estimate = 0;
         for (k, v) in cache.iter() {
-            match v {
-                IndexRepoEntry::Entry(r) => {
+            match v.get() {
+                Some(IndexRepoEntry::Entry(r)) => {
                     if now - r.last_used.load(Ordering::Acquire) > POSITIVE_CACHE_TIME {
                         todelete.push(*k);
                     } else {
@@ -324,11 +335,12 @@ impl IndexRepo {
                         memory_estimate += r.memory_estimate;
                     }
                 }
-                IndexRepoEntry::Missing(vintage) => {
+                Some(IndexRepoEntry::Missing(vintage)) => {
                     if vintage.elapsed().as_secs() > NEGATIVE_CACHE_TIME {
                         todelete.push(*k);
                     }
                 }
+                None => {}
             }
         }
         for k in todelete.into_iter() {
@@ -344,11 +356,15 @@ impl IndexRepo {
         end_ts: i64,
     ) -> impl Stream<Item = Result<preserve::TdFrame, Status>> {
         stream! {
-            for index in iter::repeat(day)
+            let indices = iter::repeat(day)
                 .enumerate()
                 .map(|(i, v)| v + (i as i64) * 86400)
                 .take_while(|day| *day < end_ts)
-                .filter_map(|day| self.get(day))
+                .map(|day| self.get(day));
+            for index in join_all(indices)
+                .await
+                .into_iter()
+                .flatten()
             {
                 let results = index
                     .search(&q)
