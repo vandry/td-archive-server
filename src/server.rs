@@ -1,15 +1,14 @@
 use chrono::{TimeZone, Utc};
-use dirs_sys::home_dir;
 use futures::stream::{self, Stream, StreamExt};
-use std::io::ErrorKind;
-use std::path::Path;
+use s3::creds::Credentials;
+use s3::Bucket;
+use s3::Region;
+use std::env;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::net::UnixListener;
 use tokio::time::sleep;
-use tokio_stream::wrappers::UnixListenerStream;
 use tonic::{transport::Server, Code, Request, Response, Status};
 
 use crate::archive::IndexRepo;
@@ -26,6 +25,12 @@ struct TDArchiveFeed {
     boundary_time: Arc<AtomicI64>,
 }
 
+async fn day_built(bucket: &Bucket, day: i64) -> bool {
+    let (dname, iname) = archive_filenames(day);
+    let (dres, ires) = tokio::join!(bucket.head_object(dname), bucket.head_object(iname));
+    dres.is_ok() && ires.is_ok()
+}
+
 impl TDArchiveFeed {
     fn new(repo: Arc<IndexRepo>, recent: Arc<RecentDatabase>) -> Self {
         Self {
@@ -35,14 +40,13 @@ impl TDArchiveFeed {
         }
     }
 
-    pub fn scan_boundary(&self, db_path: &Path) {
+    pub async fn scan_boundary(&self, bucket: Arc<Bucket>) {
         let now = now_time_t();
         let today = now - (now % 86400);
         // The index should definitely not already be built for today,
         // so start with yesterday.
         let mut boundary = today - 86400;
-        let (dname, iname) = archive_filenames(db_path, boundary);
-        if dname.is_file() && iname.is_file() {
+        if day_built(&bucket, boundary).await {
             // Yesterday's index exists, we can move on to today.
             boundary += 86400;
         }
@@ -53,14 +57,12 @@ impl TDArchiveFeed {
             "Queries for data before {}T00:00:00Z will use archive, after will use recent",
             ymd
         );
-        let db_path = db_path.to_owned();
         let published_boundary = Arc::clone(&self.boundary_time);
         let recent = Arc::clone(&self.recent);
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(300000)).await;
-                let (dname, iname) = archive_filenames(db_path.as_ref(), boundary);
-                if dname.is_file() && iname.is_file() {
+                if day_built(&bucket, boundary).await {
                     boundary += 86400;
                     published_boundary.store(boundary, Ordering::Release);
                     recent.set_boundary(boundary);
@@ -124,41 +126,39 @@ impl td_feed_server::TdFeed for TDArchiveFeed {
 }
 
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let args: Vec<_> = env::args_os().collect();
+    if args.len() != 6 {
+        eprintln!(
+            "Usage: {} endpoint region bucket live-feed serving-port",
+            args[0].to_string_lossy()
+        );
+        std::process::exit(3);
+    }
+    let s3_endpoint = args[1].to_string_lossy().into_owned();
+    let s3_region_name = args[2].to_string_lossy().into_owned();
+    let bucket_name = args[3].to_string_lossy().into_owned();
+    let live_feed_address = args[4].to_string_lossy().into_owned();
+    let serving_address = args[5].to_string_lossy().parse().unwrap();
+
     env_logger::init();
-    let dir = home_dir().expect("$HOME").join("var");
-    let serving_socket_path = dir.join("tdfeed/sock");
-    let upstream_socket_path = dir.join("collect_td_feed.sock");
-    let db_path = dir.join("tdfeed");
-    let repo = Arc::new(IndexRepo::new(db_path.as_ref()));
+
+    let s3_cred = Credentials::default().unwrap();
+    let s3_region = Region::Custom {
+        region: s3_region_name,
+        endpoint: s3_endpoint,
+    };
+    let bucket: Arc<Bucket> = Arc::from(Bucket::new(&bucket_name, s3_region, s3_cred).unwrap());
+
+    let repo = Arc::new(IndexRepo::new(bucket.clone()));
     let recent = Arc::new(RecentDatabase::new());
     let tdfeed = TDArchiveFeed::new(repo.clone(), recent.clone());
-    let listener = match UnixListener::bind(serving_socket_path.clone()) {
-        Ok(l) => Ok(l),
-        Err(listen_err) if listen_err.kind() == ErrorKind::AddrInUse => {
-            // Check if this is a stale socket.
-            match tokio::net::UnixStream::connect(serving_socket_path.clone()).await {
-                Err(e) if e.kind() == ErrorKind::ConnectionRefused => {
-                    log::warn!(
-                        "Cleaning up stale socket {}",
-                        serving_socket_path.to_string_lossy()
-                    );
-                    std::fs::remove_file(serving_socket_path.clone())?;
-                    // Try again.
-                    UnixListener::bind(serving_socket_path.clone())
-                }
-                _ => Err(listen_err),
-            }
-        }
-        Err(e) => Err(e),
-    }?;
-    log::info!("Listening on {}", serving_socket_path.to_string_lossy());
-    let listener_stream = UnixListenerStream::new(listener);
+    log::info!("Listening on {}", serving_address);
     repo.start();
-    tdfeed.scan_boundary(&db_path);
-    recent.start(&upstream_socket_path);
+    tdfeed.scan_boundary(bucket.clone()).await;
+    recent.start(&live_feed_address);
     Server::builder()
         .add_service(td_feed_server::TdFeedServer::new(tdfeed))
-        .serve_with_incoming(listener_stream)
+        .serve(serving_address)
         .await?;
     Ok(())
 }

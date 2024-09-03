@@ -1,16 +1,16 @@
 use async_stream::stream;
+use bytes::Bytes;
 use chrono::{TimeZone, Utc};
 use futures::future::join_all;
 use futures::Stream;
 use lru::LruCache;
-use memmap::{Mmap, MmapOptions};
 use prost::Message;
+use s3::error::S3Error;
+use s3::Bucket;
 use std::collections::HashMap;
-use std::fs::File;
 use std::io::{self, Read};
 use std::iter;
 use std::num::NonZeroUsize;
-use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -26,8 +26,7 @@ use crate::preserve;
 const NEGATIVE_CACHE_TIME: u64 = 240;
 const POSITIVE_CACHE_TIME: i64 = 3 * 3600;
 
-fn read_index(path: &PathBuf) -> io::Result<TdIndex> {
-    let indexfile = File::open(path)?;
+fn read_index(indexfile: &[u8]) -> io::Result<TdIndex> {
     let mut decompressor = XzDecoder::new(indexfile);
     let mut contents = Vec::new();
     decompressor.read_to_end(&mut contents)?;
@@ -44,7 +43,7 @@ fn index_vectors_to_hashmap(v: Vec<TdIndexVector>) -> HashMap<String, Vec<u8>> {
 }
 
 struct IndexReader {
-    map: Mmap,
+    datafile: Bytes,
     vector_compression: usize,
     data_length: usize,
     veclen: usize,
@@ -67,16 +66,54 @@ impl Drop for IndexReader {
     }
 }
 
+enum IndexReaderLoadError {
+    LoadError(S3Error),
+    IOError(std::io::Error),
+    DataFileWrongLength(usize, usize),
+}
+
+impl std::fmt::Display for IndexReaderLoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            Self::LoadError(ref e) => write!(f, "{}", e),
+            Self::IOError(ref e) => write!(f, "{}", e),
+            Self::DataFileWrongLength(expected, actual) => write!(
+                f,
+                "Data file has wrong length: expected {}, got {}",
+                expected, actual
+            ),
+        }
+    }
+}
+
+impl From<S3Error> for IndexReaderLoadError {
+    fn from(e: S3Error) -> Self {
+        Self::LoadError(e)
+    }
+}
+
+impl From<std::io::Error> for IndexReaderLoadError {
+    fn from(e: std::io::Error) -> Self {
+        Self::IOError(e)
+    }
+}
+
 impl IndexReader {
-    fn load(dir: &Path, day: i64) -> io::Result<Self> {
-        let (data_name, index_name) = archive_filenames(dir, day);
-        let mut index = read_index(&index_name)?;
-        let datafile = File::open(data_name)?;
-        let map = unsafe { MmapOptions::new().map(&datafile) }?;
+    async fn load(bucket: &Bucket, day: i64) -> Result<Self, IndexReaderLoadError> {
+        let (data_name, index_name) = archive_filenames(day);
+        let (m_indexfile, m_datafile) =
+            tokio::join!(bucket.get_object(index_name), bucket.get_object(data_name));
+        let indexfile = m_indexfile?;
+        let datafile = m_datafile?;
+        let mut index = read_index(indexfile.as_slice())?;
 
         let data_length: usize = index.data_length.unwrap_or_default().try_into().unwrap();
-        if map.len() < data_length {
-            return Err(io::Error::new(io::ErrorKind::Other, "data file too short"));
+        let actual_data_length = datafile.as_slice().len();
+        if actual_data_length < data_length {
+            return Err(IndexReaderLoadError::DataFileWrongLength(
+                data_length,
+                actual_data_length,
+            ));
         }
         let num_frames = index.frame_offset.len();
         let vector_compression: usize = index
@@ -90,7 +127,7 @@ impl IndexReader {
         }
 
         let mut ret = Self {
-            map,
+            datafile: datafile.into_bytes(),
             vector_compression,
             data_length,
             veclen,
@@ -108,7 +145,7 @@ impl IndexReader {
         };
         let nvectors: usize =
             ret.area_ids.len() + ret.descriptions.iter().map(|h| h.len()).sum::<usize>();
-        ret.memory_estimate = 4 * ret.frame_offsets.len() + veclen * nvectors;
+        ret.memory_estimate = 4 * ret.frame_offsets.len() + veclen * nvectors + actual_data_length;
         log::info!(
             "Loaded {}",
             Utc.timestamp_opt(day, 0).unwrap().format("%Y-%m-%d")
@@ -199,7 +236,7 @@ impl IndexReader {
         if start > end || start > self.data_length || end > self.data_length {
             return None;
         }
-        T::decode(&self.map[start..end]).ok()
+        T::decode(&self.datafile[start..end]).ok()
     }
 }
 
@@ -258,14 +295,14 @@ enum IndexRepoEntry {
 }
 
 pub struct IndexRepo {
-    dir: PathBuf,
+    bucket: Arc<Bucket>,
     cache: Mutex<LruCache<i64, Arc<OnceCell<IndexRepoEntry>>>>,
 }
 
 impl IndexRepo {
-    pub fn new(dir: &Path) -> Self {
+    pub fn new(bucket: Arc<Bucket>) -> Self {
         Self {
-            dir: dir.to_owned(),
+            bucket,
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
         }
     }
@@ -279,7 +316,7 @@ impl IndexRepo {
             .clone();
         match entry
             .get_or_init(|| async {
-                match IndexReader::load(&self.dir, day) {
+                match IndexReader::load(&self.bucket, day).await {
                     Ok(r) => IndexRepoEntry::Entry(Arc::new(r)),
                     Err(e) => {
                         log::error!(

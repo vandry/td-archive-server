@@ -2,17 +2,13 @@ use async_stream::stream;
 use futures::Stream;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::net::UnixStream;
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
-use tonic::transport::{Endpoint, Uri};
 use tonic::{Request, Status};
-use tower::service_fn;
 
 use crate::common::{intersect, now_time_t, query_matches, union};
 use crate::openraildata_pb::{td_feed_client, TdQuery};
@@ -220,22 +216,10 @@ pub struct RecentDatabase {
 }
 
 async fn get_live(
-    socket_path: &Path,
+    socket_path: String,
     feed: &RecentDatabase,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let socket_path = socket_path.to_owned();
-    let uri = Uri::builder()
-        .scheme("http") // unused
-        .authority("[::]") // unused
-        .path_and_query(socket_path.to_str().unwrap())
-        .build()
-        .unwrap();
-    let channel = Endpoint::from(uri)
-        .connect_with_connector(service_fn(|u: Uri| {
-            UnixStream::connect(u.path_and_query().unwrap().path().to_owned())
-        }))
-        .await?;
-    let mut client = td_feed_client::TdFeedClient::new(channel);
+    let mut client = td_feed_client::TdFeedClient::connect(socket_path).await?;
     let mut stream = client
         .feed(Request::new(TdQuery::default()))
         .await?
@@ -436,12 +420,12 @@ impl RecentDatabase {
         }
     }
 
-    pub fn start(self: Arc<Self>, socket_path: &Path) {
+    pub fn start(self: Arc<Self>, socket_path: &str) {
         let socket_path = socket_path.to_owned();
         let self_live_getter = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = get_live(&socket_path, &self_live_getter).await {
+                if let Err(e) = get_live(socket_path.clone(), &self_live_getter).await {
                     log::error!("Getting live feed: {}", e);
                 }
                 sleep(Duration::from_millis(10000)).await;

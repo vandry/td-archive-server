@@ -3,3 +3,4 @@ docker build -t vandry/td_feed_archive .
 docker push vandry/td_feed_archive
 kubectl create secret generic s3.credentials --from-file=credentials=$HOME/.aws/credentials
 kubectl apply -f k8s-cron.yaml
+kubectl apply -f k8s-serving.yaml
