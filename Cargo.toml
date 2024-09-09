@@ -29,3 +29,7 @@ tonic-build = "0.8"
 [[bin]]
 name = "mktdarchive"
 path = "src/mktdarchive.rs"
+
+[[bin]]
+name = "td-archive-backup"
+path = "src/td-archive-backup.rs"
