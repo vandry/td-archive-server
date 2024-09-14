@@ -57,4 +57,4 @@ spec:
   ports:
     - port: 3001
       targetPort: 3001
-  type: LoadBalancer
+  type: ClusterIP
