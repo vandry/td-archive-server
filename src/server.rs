@@ -1,6 +1,7 @@
 use chrono::{TimeZone, Utc};
 use futures::stream::{self, Stream, StreamExt};
 use s3::creds::Credentials;
+use s3::error::S3Error;
 use s3::Bucket;
 use s3::Region;
 use std::env;
@@ -13,6 +14,7 @@ use tonic::{transport::Server, Code, Request, Response, Status};
 
 use crate::archive::IndexRepo;
 use crate::common::{archive_filenames, now_time_t};
+use crate::health::HealthTracker;
 use crate::openraildata_pb::{td_feed_server, TdQuery};
 use crate::preserve;
 use crate::recent::RecentDatabase;
@@ -25,10 +27,22 @@ struct TDArchiveFeed {
     boundary_time: Arc<AtomicI64>,
 }
 
-async fn day_built(bucket: &Bucket, day: i64) -> bool {
+fn map_exists<T>(r: Result<T, S3Error>) -> Result<bool, S3Error> {
+    r.map_or_else(
+        |e| match e {
+            S3Error::HttpFailWithBody(code, _) if code == 404 => Ok(false),
+            _ => Err(e),
+        },
+        |_| Ok(true),
+    )
+}
+
+async fn day_built(bucket: &Bucket, day: i64) -> Result<bool, S3Error> {
     let (dname, iname) = archive_filenames(day);
     let (dres, ires) = tokio::join!(bucket.head_object(dname), bucket.head_object(iname));
-    dres.is_ok() && ires.is_ok()
+    let dres = map_exists(dres)?;
+    let ires = map_exists(ires)?;
+    Ok(dres && ires)
 }
 
 impl TDArchiveFeed {
@@ -40,15 +54,29 @@ impl TDArchiveFeed {
         }
     }
 
-    pub async fn scan_boundary(&self, bucket: Arc<Bucket>) {
+    pub async fn scan_boundary(&self, bucket: Arc<Bucket>, ht: HealthTracker) {
+        let mut ht = Some(ht);
         let now = now_time_t();
         let today = now - (now % 86400);
         // The index should definitely not already be built for today,
         // so start with yesterday.
         let mut boundary = today - 86400;
-        if day_built(&bucket, boundary).await {
-            // Yesterday's index exists, we can move on to today.
-            boundary += 86400;
+        match day_built(&bucket, boundary).await {
+            Ok(true) => {
+                // Yesterday's index exists, we can move on to today.
+                boundary += 86400;
+                if let Some(t) = ht.take() {
+                    t.healthy_bucket().await;
+                }
+            }
+            Ok(false) => {
+                if let Some(t) = ht.take() {
+                    t.healthy_bucket().await;
+                }
+            }
+            Err(e) => {
+                log::error!("Error querying bucket: {}; will try again", e);
+            }
         }
         self.boundary_time.store(boundary, Ordering::Release);
         self.recent.set_boundary(boundary);
@@ -61,13 +89,27 @@ impl TDArchiveFeed {
         let recent = Arc::clone(&self.recent);
         tokio::spawn(async move {
             loop {
-                sleep(Duration::from_millis(300000)).await;
-                if day_built(&bucket, boundary).await {
-                    boundary += 86400;
-                    published_boundary.store(boundary, Ordering::Release);
-                    recent.set_boundary(boundary);
-                    let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
-                    log::info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
+                let ms = if ht.is_some() { 5000 } else { 300000 };
+                sleep(Duration::from_millis(ms)).await;
+                match day_built(&bucket, boundary).await {
+                    Ok(true) => {
+                        if let Some(t) = ht.take() {
+                            t.healthy_bucket().await;
+                        }
+                        boundary += 86400;
+                        published_boundary.store(boundary, Ordering::Release);
+                        recent.set_boundary(boundary);
+                        let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
+                        log::info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
+                    }
+                    Ok(false) => {
+                        if let Some(t) = ht.take() {
+                            t.healthy_bucket().await;
+                        }
+                    }
+                    Err(e) => {
+                        log::error!("Error querying bucket: {}; will try again", e);
+                    }
                 }
             }
         });
@@ -149,14 +191,17 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let bucket: Arc<Bucket> = Arc::from(Bucket::new(&bucket_name, s3_region, s3_cred).unwrap());
 
+    let (health_reporter, health_service) = tonic_health::server::health_reporter();
+    let ht = HealthTracker::new(health_reporter).await;
     let repo = Arc::new(IndexRepo::new(bucket.clone()));
     let recent = Arc::new(RecentDatabase::new());
     let tdfeed = TDArchiveFeed::new(repo.clone(), recent.clone());
     log::info!("Listening on {}", serving_address);
     repo.start();
-    tdfeed.scan_boundary(bucket.clone()).await;
-    recent.start(&live_feed_address);
+    tdfeed.scan_boundary(bucket.clone(), ht.clone()).await;
+    recent.start(&live_feed_address, ht);
     Server::builder()
+        .add_service(health_service)
         .add_service(td_feed_server::TdFeedServer::new(tdfeed))
         .serve(serving_address)
         .await?;

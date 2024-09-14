@@ -4,6 +4,7 @@ pub mod openraildata_pb {
 
 mod archive;
 mod common;
+mod health;
 mod preserve;
 mod recent;
 mod server;

@@ -11,6 +11,7 @@ use tokio_stream::StreamExt;
 use tonic::{Request, Status};
 
 use crate::common::{intersect, now_time_t, query_matches, union};
+use crate::health::HealthTracker;
 use crate::openraildata_pb::{td_feed_client, TdQuery};
 use crate::preserve;
 
@@ -218,6 +219,8 @@ pub struct RecentDatabase {
 async fn get_live(
     socket_path: String,
     feed: &RecentDatabase,
+    ht: &mut HealthTracker,
+    got_at_least_one: &mut bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut client = td_feed_client::TdFeedClient::connect(socket_path).await?;
     let mut stream = client
@@ -225,6 +228,10 @@ async fn get_live(
         .await?
         .into_inner();
     while let Some(frame) = stream.next().await {
+        if !*got_at_least_one {
+            *got_at_least_one = true;
+            ht.healthy_live_feed(true).await;
+        }
         feed.submit(frame?).await;
     }
     Ok(())
@@ -420,13 +427,24 @@ impl RecentDatabase {
         }
     }
 
-    pub fn start(self: Arc<Self>, socket_path: &str) {
+    pub fn start(self: Arc<Self>, socket_path: &str, mut ht: HealthTracker) {
         let socket_path = socket_path.to_owned();
         let self_live_getter = self.clone();
         tokio::spawn(async move {
             loop {
-                if let Err(e) = get_live(socket_path.clone(), &self_live_getter).await {
+                let mut got_at_least_one = false;
+                if let Err(e) = get_live(
+                    socket_path.clone(),
+                    &self_live_getter,
+                    &mut ht,
+                    &mut got_at_least_one,
+                )
+                .await
+                {
                     log::error!("Getting live feed: {}", e);
+                }
+                if !got_at_least_one {
+                    ht.healthy_live_feed(false).await;
                 }
                 sleep(Duration::from_millis(10000)).await;
             }

@@ -24,6 +24,14 @@ spec:
         - "td-archive"
         - "http://collect-td-feed:3000"
         - "[::]:3001"
+        livenessProbe:
+          grpc:
+            port: 3001
+            service: liveness
+        readinessProbe:
+          grpc:
+            port: 3001
+            service: readiness
         volumeMounts:
           - name: s3-credentials
             readOnly: true
