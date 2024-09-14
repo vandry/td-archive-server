@@ -167,6 +167,14 @@ impl td_feed_server::TdFeed for TDArchiveFeed {
     }
 }
 
+async fn shutdown_signal() {
+    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("catch SIGTERM")
+        .recv()
+        .await;
+    log::info!("Received SIGTERM, shutting down.");
+}
+
 pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = env::args_os().collect();
     if args.len() != 6 {
@@ -203,7 +211,7 @@ pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Server::builder()
         .add_service(health_service)
         .add_service(td_feed_server::TdFeedServer::new(tdfeed))
-        .serve(serving_address)
+        .serve_with_shutdown(serving_address, shutdown_signal())
         .await?;
     Ok(())
 }
