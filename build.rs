@@ -1,5 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tonic_build::configure().proto_path("crate::preserve").compile(
+    tonic_build::configure().proto_path("crate::preserve").compile_protos(
         &["proto/td_feed.proto", "proto/td_index.proto"],
         &["proto"]
     )?;

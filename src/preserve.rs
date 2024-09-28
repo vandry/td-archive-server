@@ -34,23 +34,17 @@ impl<T> Deref for PreservingMessage<T> {
 }
 
 impl<T: prost::Message + Default> prost::Message for PreservingMessage<T> {
-    fn encode_raw<B>(&self, buf: &mut B)
-    where
-        B: BufMut,
-    {
+    fn encode_raw(&self, buf: &mut impl BufMut) {
         buf.put_slice(&self.original_serialised);
     }
 
-    fn merge_field<B>(
+    fn merge_field(
         &mut self,
         _tag: u32,
         _wire_type: WireType,
-        _buf: &mut B,
+        _buf: &mut impl Buf,
         _ctx: DecodeContext,
-    ) -> Result<(), DecodeError>
-    where
-        B: Buf,
-    {
+    ) -> Result<(), DecodeError> {
         panic!("PreservingMessage is immutable");
     }
 
@@ -62,10 +56,7 @@ impl<T: prost::Message + Default> prost::Message for PreservingMessage<T> {
         panic!("PreservingMessage is immutable");
     }
 
-    fn decode<B>(buf: B) -> Result<Self, DecodeError>
-    where
-        B: Buf,
-    {
+    fn decode(buf: impl Buf) -> Result<Self, DecodeError> {
         let mut original_serialised = Vec::with_capacity(buf.remaining());
         buf.reader().read_to_end(&mut original_serialised).unwrap();
         let decoded = T::decode(std::io::Cursor::new(&original_serialised))?;
