@@ -13,31 +13,37 @@ spec:
     metadata:
       labels:
         app: td-archive-server
+      annotations:
+        prometheus.io/path: /metrics
+        prometheus.io/port: "9090"
+        prometheus.io/scrape: "true"
     spec:
       containers:
       - name: td-archive-server
         image: vandry/td_feed_archive
         command:
         - "/td-archive-server"
-        - "https://sos-ch-dk-2.exo.io"
-        - "ch-dk-2"
-        - "td-archive"
-        - "http://collect-td-feed:3000"
-        - "[::]:3001"
+        - "--s3-endpoint=https://sos-ch-dk-2.exo.io"
+        - "--s3-region-name=ch-dk-2"
+        - "--bucket-name=td-archive"
+        - "--live-feed-address=http://collect-td-feed:3000"
+        - "--grpc-port=3001"
+        - "--diag-http-port=9090"
         livenessProbe:
           grpc:
             port: 3001
-            service: liveness
+            service: ""
         readinessProbe:
           grpc:
             port: 3001
-            service: readiness
+            service: "ready"
         volumeMounts:
           - name: s3-credentials
             readOnly: true
             mountPath: "/root/.aws"
         ports:
         - containerPort: 3001
+        - containerPort: 9090
         env:
         - name: RUST_LOG
           value: info

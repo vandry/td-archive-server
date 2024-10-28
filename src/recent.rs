@@ -1,4 +1,5 @@
 use async_stream::stream;
+use comprehensive::health::HealthSignaller;
 use futures::Stream;
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
@@ -8,10 +9,10 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
+use tonic::transport::Uri;
 use tonic::{Request, Status};
 
 use crate::common::{intersect, now_time_t, query_matches, union};
-use crate::health::HealthTracker;
 use crate::openraildata_pb::{td_feed_client, TdQuery};
 use crate::preserve;
 
@@ -217,12 +218,12 @@ pub struct RecentDatabase {
 }
 
 async fn get_live(
-    socket_path: String,
+    live_feed_address: Uri,
     feed: &RecentDatabase,
-    ht: &mut HealthTracker,
+    ht: &HealthSignaller,
     got_at_least_one: &mut bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = td_feed_client::TdFeedClient::connect(socket_path).await?;
+    let mut client = td_feed_client::TdFeedClient::connect(live_feed_address).await?;
     let mut stream = client
         .feed(Request::new(TdQuery::default()))
         .await?
@@ -230,7 +231,7 @@ async fn get_live(
     while let Some(frame) = stream.next().await {
         if !*got_at_least_one {
             *got_at_least_one = true;
-            ht.healthy_live_feed(true).await;
+            ht.set_healthy(true);
         }
         feed.submit(frame?).await;
     }
@@ -427,16 +428,15 @@ impl RecentDatabase {
         }
     }
 
-    pub fn start(self: Arc<Self>, socket_path: &str, mut ht: HealthTracker) {
-        let socket_path = socket_path.to_owned();
+    pub fn start(self: Arc<Self>, live_feed_address: Uri, ht: HealthSignaller) {
         let self_live_getter = self.clone();
         tokio::spawn(async move {
             loop {
                 let mut got_at_least_one = false;
                 if let Err(e) = get_live(
-                    socket_path.clone(),
+                    live_feed_address.clone(),
                     &self_live_getter,
-                    &mut ht,
+                    &ht,
                     &mut got_at_least_one,
                 )
                 .await
@@ -444,7 +444,7 @@ impl RecentDatabase {
                     log::error!("Getting live feed: {}", e);
                 }
                 if !got_at_least_one {
-                    ht.healthy_live_feed(false).await;
+                    ht.set_healthy(false);
                 }
                 sleep(Duration::from_millis(10000)).await;
             }

@@ -1,20 +1,22 @@
+use atomic_take::AtomicTake;
 use chrono::{TimeZone, Utc};
+use comprehensive::health::{HealthReporter, HealthSignaller};
+use comprehensive::{Resource, ResourceDependencies};
 use futures::stream::{self, Stream, StreamExt};
 use s3::creds::Credentials;
 use s3::error::S3Error;
 use s3::Bucket;
 use s3::Region;
-use std::env;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tonic::{transport::Server, Code, Request, Response, Status};
+use tonic::transport::Uri;
+use tonic::{Code, Request, Response, Status};
 
 use crate::archive::IndexRepo;
 use crate::common::{archive_filenames, now_time_t};
-use crate::health::HealthTracker;
 use crate::openraildata_pb::{td_feed_server, TdQuery};
 use crate::preserve;
 use crate::recent::RecentDatabase;
@@ -22,7 +24,6 @@ use crate::recent::RecentDatabase;
 const MAX_QUERY_TIME: i64 = 86400 * 20;
 
 struct TDArchiveFeed {
-    repo: Arc<IndexRepo>,
     recent: Arc<RecentDatabase>,
     boundary_time: Arc<AtomicI64>,
 }
@@ -46,15 +47,14 @@ async fn day_built(bucket: &Bucket, day: i64) -> Result<bool, S3Error> {
 }
 
 impl TDArchiveFeed {
-    fn new(repo: Arc<IndexRepo>, recent: Arc<RecentDatabase>) -> Self {
+    fn new(recent: Arc<RecentDatabase>) -> Self {
         Self {
-            repo,
             recent,
             boundary_time: Arc::new(AtomicI64::new(0)),
         }
     }
 
-    pub async fn scan_boundary(&self, bucket: Arc<Bucket>, ht: HealthTracker) {
+    pub async fn scan_boundary(&self, bucket: Arc<Bucket>, ht: HealthSignaller) {
         let mut ht = Some(ht);
         let now = now_time_t();
         let today = now - (now % 86400);
@@ -66,12 +66,12 @@ impl TDArchiveFeed {
                 // Yesterday's index exists, we can move on to today.
                 boundary += 86400;
                 if let Some(t) = ht.take() {
-                    t.healthy_bucket().await;
+                    t.set_healthy(true);
                 }
             }
             Ok(false) => {
                 if let Some(t) = ht.take() {
-                    t.healthy_bucket().await;
+                    t.set_healthy(true);
                 }
             }
             Err(e) => {
@@ -94,7 +94,7 @@ impl TDArchiveFeed {
                 match day_built(&bucket, boundary).await {
                     Ok(true) => {
                         if let Some(t) = ht.take() {
-                            t.healthy_bucket().await;
+                            t.set_healthy(true);
                         }
                         boundary += 86400;
                         published_boundary.store(boundary, Ordering::Release);
@@ -104,7 +104,7 @@ impl TDArchiveFeed {
                     }
                     Ok(false) => {
                         if let Some(t) = ht.take() {
-                            t.healthy_bucket().await;
+                            t.set_healthy(true);
                         }
                     }
                     Err(e) => {
@@ -117,7 +117,7 @@ impl TDArchiveFeed {
 }
 
 #[tonic::async_trait]
-impl td_feed_server::TdFeed for TDArchiveFeed {
+impl td_feed_server::TdFeed for TDArchiveFeedResource {
     type FeedStream = Pin<Box<dyn Stream<Item = Result<preserve::TdFrame, Status>> + Send>>;
 
     async fn feed(&self, req: Request<TdQuery>) -> Result<Response<Self::FeedStream>, Status> {
@@ -145,7 +145,8 @@ impl td_feed_server::TdFeed for TDArchiveFeed {
             ));
         }
 
-        let boundary = self.boundary_time.load(Ordering::Acquire);
+        let tdfeed = &self.tdfeed;
+        let boundary = tdfeed.boundary_time.load(Ordering::Acquire);
         let mut streams = Vec::<Self::FeedStream>::new();
 
         if start_ts < boundary {
@@ -167,51 +168,85 @@ impl td_feed_server::TdFeed for TDArchiveFeed {
     }
 }
 
-async fn shutdown_signal() {
-    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("catch SIGTERM")
-        .recv()
-        .await;
-    log::info!("Received SIGTERM, shutting down.");
+struct HealthSignallers {
+    bucket: HealthSignaller,
+    live: HealthSignaller,
 }
 
-pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let args: Vec<_> = env::args_os().collect();
-    if args.len() != 6 {
-        eprintln!(
-            "Usage: {} endpoint region bucket live-feed serving-port",
-            args[0].to_string_lossy()
-        );
-        std::process::exit(3);
+pub struct TDArchiveFeedResource {
+    bucket: Arc<Bucket>,
+    repo: Arc<IndexRepo>,
+    recent: Arc<RecentDatabase>,
+    tdfeed: TDArchiveFeed,
+    live_feed_address: Uri,
+    signallers: AtomicTake<HealthSignallers>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct Args {
+    #[arg(long)]
+    s3_endpoint: String,
+
+    #[arg(long)]
+    s3_region_name: String,
+
+    #[arg(long)]
+    bucket_name: String,
+
+    #[arg(long)]
+    live_feed_address: Uri,
+}
+
+#[derive(ResourceDependencies)]
+pub struct TDArchiveFeedResourceDependencies(Arc<HealthReporter>);
+
+impl Resource for TDArchiveFeedResource {
+    type Args = Args;
+    type Dependencies = TDArchiveFeedResourceDependencies;
+    const NAME: &str = "TDArchiveFeed";
+
+    fn new(
+        d: TDArchiveFeedResourceDependencies,
+        args: Args,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let s3_cred = Credentials::default().unwrap();
+        let s3_region = Region::Custom {
+            region: args.s3_region_name,
+            endpoint: args.s3_endpoint,
+        };
+        let bucket: Arc<Bucket> =
+            Arc::from(Bucket::new(&args.bucket_name, s3_region, s3_cred).unwrap());
+
+        let repo = Arc::new(IndexRepo::new(bucket.clone()));
+        let recent = Arc::new(RecentDatabase::new());
+        let tdfeed = TDArchiveFeed::new(recent.clone());
+
+        Ok(Self {
+            repo,
+            recent,
+            tdfeed,
+            live_feed_address: args.live_feed_address,
+            bucket,
+            signallers: AtomicTake::new(HealthSignallers {
+                bucket: d.0.register("bucket")?,
+                live: d.0.register("live")?,
+            }),
+        })
     }
-    let s3_endpoint = args[1].to_string_lossy().into_owned();
-    let s3_region_name = args[2].to_string_lossy().into_owned();
-    let bucket_name = args[3].to_string_lossy().into_owned();
-    let live_feed_address = args[4].to_string_lossy().into_owned();
-    let serving_address = args[5].to_string_lossy().parse().unwrap();
 
-    env_logger::init();
-
-    let s3_cred = Credentials::default().unwrap();
-    let s3_region = Region::Custom {
-        region: s3_region_name,
-        endpoint: s3_endpoint,
-    };
-    let bucket: Arc<Bucket> = Arc::from(Bucket::new(&bucket_name, s3_region, s3_cred).unwrap());
-
-    let (health_reporter, health_service) = tonic_health::server::health_reporter();
-    let ht = HealthTracker::new(health_reporter).await;
-    let repo = Arc::new(IndexRepo::new(bucket.clone()));
-    let recent = Arc::new(RecentDatabase::new());
-    let tdfeed = TDArchiveFeed::new(repo.clone(), recent.clone());
-    log::info!("Listening on {}", serving_address);
-    repo.start();
-    tdfeed.scan_boundary(bucket.clone(), ht.clone()).await;
-    recent.start(&live_feed_address, ht);
-    Server::builder()
-        .add_service(health_service)
-        .add_service(td_feed_server::TdFeedServer::new(tdfeed))
-        .serve_with_shutdown(serving_address, shutdown_signal())
-        .await?;
-    Ok(())
+    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let signallers = self.signallers.take().unwrap();
+        Arc::clone(&self.repo).start();
+        self.tdfeed
+            .scan_boundary(self.bucket.clone(), signallers.bucket)
+            .await;
+        Arc::clone(&self.recent).start(self.live_feed_address.clone(), signallers.live);
+        Ok(())
+    }
 }
+
+#[derive(comprehensive_grpc::GrpcService)]
+#[implementation(TDArchiveFeedResource)]
+#[service(td_feed_server::TdFeedServer)]
+#[descriptor(crate::openraildata_pb::FILE_DESCRIPTOR_SET)]
+pub struct TDArchiveFeedGrpcService;
