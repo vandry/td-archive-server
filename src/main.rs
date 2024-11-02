@@ -9,6 +9,8 @@ mod preserve;
 mod recent;
 mod server;
 
+comprehensive_s3::bucket!(TDArchiveBucket, "TD storage", "");
+
 #[derive(comprehensive::ResourceDependencies)]
 struct TopDependencies {
     _grpc_service: std::sync::Arc<server::TDArchiveFeedGrpcService>,

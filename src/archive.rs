@@ -1,6 +1,7 @@
 use async_stream::stream;
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
+use comprehensive::{NoArgs, Resource, ResourceDependencies};
 use futures::future::join_all;
 use futures::Stream;
 use lru::LruCache;
@@ -19,6 +20,7 @@ use tokio::time::{sleep, Duration};
 use tonic::Status;
 use xz::read::XzDecoder;
 
+use crate::TDArchiveBucket;
 use crate::common::{archive_filenames, intersect, now_time_t, query_matches, union};
 use crate::openraildata_pb::{TdFrame, TdIndex, TdIndexVector, TdQuery};
 use crate::preserve;
@@ -295,18 +297,44 @@ enum IndexRepoEntry {
 }
 
 pub struct IndexRepo {
-    bucket: Arc<Bucket>,
+    bucket: Arc<TDArchiveBucket>,
     cache: Mutex<LruCache<i64, Arc<OnceCell<IndexRepoEntry>>>>,
 }
 
-impl IndexRepo {
-    pub fn new(bucket: Arc<Bucket>) -> Self {
-        Self {
-            bucket,
+#[derive(ResourceDependencies)]
+pub struct IndexRepoDependencies(Arc<TDArchiveBucket>);
+
+impl Resource for IndexRepo {
+    type Args = NoArgs;
+    type Dependencies = IndexRepoDependencies;
+    const NAME: &str = "TD Archive";
+
+    fn new(d: IndexRepoDependencies, _: NoArgs) -> Result<Self, Box<dyn std::error::Error>> {
+        Ok(Self {
+            bucket: d.0,
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
+        })
+    }
+
+    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let mut infolog = Instant::now();
+        loop {
+            let (count, memory_estimate) = self.get_stats();
+            if infolog.elapsed().as_secs() >= 600 {
+                log::info!(
+                    "Caching {} days using at least {} bytes of memory",
+                    count,
+                    memory_estimate
+                );
+                infolog = Instant::now();
+            }
+            sleep(Duration::from_millis(10000)).await;
         }
     }
 
+}
+
+impl IndexRepo {
     async fn get(&self, day: i64) -> Option<Arc<IndexReader>> {
         let entry = self
             .cache
@@ -316,7 +344,7 @@ impl IndexRepo {
             .clone();
         match entry
             .get_or_init(|| async {
-                match IndexReader::load(&self.bucket, day).await {
+                match IndexReader::load(self.bucket.as_ref().as_ref(), day).await {
                     Ok(r) => IndexRepoEntry::Entry(Arc::new(r)),
                     Err(e) => {
                         log::error!(
@@ -336,24 +364,6 @@ impl IndexRepo {
             }
             IndexRepoEntry::Missing(_) => None,
         }
-    }
-
-    pub fn start(self: Arc<Self>) {
-        tokio::spawn(async move {
-            let mut infolog = Instant::now();
-            loop {
-                let (count, memory_estimate) = self.get_stats();
-                if infolog.elapsed().as_secs() >= 600 {
-                    log::info!(
-                        "Caching {} days using at least {} bytes of memory",
-                        count,
-                        memory_estimate
-                    );
-                    infolog = Instant::now();
-                }
-                sleep(Duration::from_millis(10000)).await;
-            }
-        });
     }
 
     fn get_stats(&self) -> (usize, usize) {

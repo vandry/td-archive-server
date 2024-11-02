@@ -14,6 +14,7 @@ env_logger = "0.10"
 clap = { version = "4.5", features = ["derive"] }
 comprehensive = { version = "0.5" }
 comprehensive_grpc = { version = "0.5" }
+comprehensive_s3 = { version = "0.1" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
 lru = "0.12"

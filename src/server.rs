@@ -3,10 +3,8 @@ use chrono::{TimeZone, Utc};
 use comprehensive::health::{HealthReporter, HealthSignaller};
 use comprehensive::{Resource, ResourceDependencies};
 use futures::stream::{self, Stream, StreamExt};
-use s3::creds::Credentials;
 use s3::error::S3Error;
 use s3::Bucket;
-use s3::Region;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
@@ -15,6 +13,7 @@ use tokio::time::sleep;
 use tonic::transport::Uri;
 use tonic::{Code, Request, Response, Status};
 
+use crate::TDArchiveBucket;
 use crate::archive::IndexRepo;
 use crate::common::{archive_filenames, now_time_t};
 use crate::openraildata_pb::{td_feed_server, TdQuery};
@@ -54,26 +53,18 @@ impl TDArchiveFeed {
         }
     }
 
-    pub async fn scan_boundary(&self, bucket: Arc<Bucket>, ht: HealthSignaller) {
-        let mut ht = Some(ht);
+    pub async fn scan_boundary<T: AsRef<Bucket> + Send + Sync + 'static>(&self, bucket: Arc<T>) {
         let now = now_time_t();
         let today = now - (now % 86400);
         // The index should definitely not already be built for today,
         // so start with yesterday.
         let mut boundary = today - 86400;
-        match day_built(&bucket, boundary).await {
+        match day_built(bucket.as_ref().as_ref(), boundary).await {
             Ok(true) => {
                 // Yesterday's index exists, we can move on to today.
                 boundary += 86400;
-                if let Some(t) = ht.take() {
-                    t.set_healthy(true);
-                }
             }
-            Ok(false) => {
-                if let Some(t) = ht.take() {
-                    t.set_healthy(true);
-                }
-            }
+            Ok(false) => (),
             Err(e) => {
                 log::error!("Error querying bucket: {}; will try again", e);
             }
@@ -89,24 +80,16 @@ impl TDArchiveFeed {
         let recent = Arc::clone(&self.recent);
         tokio::spawn(async move {
             loop {
-                let ms = if ht.is_some() { 5000 } else { 300000 };
-                sleep(Duration::from_millis(ms)).await;
-                match day_built(&bucket, boundary).await {
+                sleep(Duration::from_millis(300000)).await;
+                match day_built(bucket.as_ref().as_ref(), boundary).await {
                     Ok(true) => {
-                        if let Some(t) = ht.take() {
-                            t.set_healthy(true);
-                        }
                         boundary += 86400;
                         published_boundary.store(boundary, Ordering::Release);
                         recent.set_boundary(boundary);
                         let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
                         log::info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
                     }
-                    Ok(false) => {
-                        if let Some(t) = ht.take() {
-                            t.set_healthy(true);
-                        }
-                    }
+                    Ok(false) => (),
                     Err(e) => {
                         log::error!("Error querying bucket: {}; will try again", e);
                     }
@@ -168,37 +151,27 @@ impl td_feed_server::TdFeed for TDArchiveFeedResource {
     }
 }
 
-struct HealthSignallers {
-    bucket: HealthSignaller,
-    live: HealthSignaller,
-}
-
 pub struct TDArchiveFeedResource {
-    bucket: Arc<Bucket>,
+    bucket: Arc<TDArchiveBucket>,
     repo: Arc<IndexRepo>,
     recent: Arc<RecentDatabase>,
     tdfeed: TDArchiveFeed,
     live_feed_address: Uri,
-    signallers: AtomicTake<HealthSignallers>,
+    signaller: AtomicTake<HealthSignaller>,
 }
 
 #[derive(clap::Args, Debug)]
 pub struct Args {
     #[arg(long)]
-    s3_endpoint: String,
-
-    #[arg(long)]
-    s3_region_name: String,
-
-    #[arg(long)]
-    bucket_name: String,
-
-    #[arg(long)]
     live_feed_address: Uri,
 }
 
 #[derive(ResourceDependencies)]
-pub struct TDArchiveFeedResourceDependencies(Arc<HealthReporter>);
+pub struct TDArchiveFeedResourceDependencies {
+    health_reporter: Arc<HealthReporter>,
+    bucket: Arc<TDArchiveBucket>,
+    repo: Arc<IndexRepo>,
+}
 
 impl Resource for TDArchiveFeedResource {
     type Args = Args;
@@ -209,38 +182,25 @@ impl Resource for TDArchiveFeedResource {
         d: TDArchiveFeedResourceDependencies,
         args: Args,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let s3_cred = Credentials::default().unwrap();
-        let s3_region = Region::Custom {
-            region: args.s3_region_name,
-            endpoint: args.s3_endpoint,
-        };
-        let bucket: Arc<Bucket> =
-            Arc::from(Bucket::new(&args.bucket_name, s3_region, s3_cred).unwrap());
-
-        let repo = Arc::new(IndexRepo::new(bucket.clone()));
         let recent = Arc::new(RecentDatabase::new());
         let tdfeed = TDArchiveFeed::new(recent.clone());
 
         Ok(Self {
-            repo,
+            repo: d.repo,
             recent,
             tdfeed,
             live_feed_address: args.live_feed_address,
-            bucket,
-            signallers: AtomicTake::new(HealthSignallers {
-                bucket: d.0.register("bucket")?,
-                live: d.0.register("live")?,
-            }),
+            bucket: d.bucket,
+            signaller: AtomicTake::new(d.health_reporter.register("live")?),
         })
     }
 
     async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let signallers = self.signallers.take().unwrap();
-        Arc::clone(&self.repo).start();
+        let signaller = self.signaller.take().unwrap();
         self.tdfeed
-            .scan_boundary(self.bucket.clone(), signallers.bucket)
+            .scan_boundary(self.bucket.clone())
             .await;
-        Arc::clone(&self.recent).start(self.live_feed_address.clone(), signallers.live);
+        Arc::clone(&self.recent).start(self.live_feed_address.clone(), signaller);
         Ok(())
     }
 }
