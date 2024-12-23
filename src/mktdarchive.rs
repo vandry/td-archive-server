@@ -124,11 +124,62 @@ impl std::fmt::Display for AlreadyBuiltError {
     }
 }
 
+#[derive(Debug)]
+struct LeftoverSpoolFiles;
+
+impl std::error::Error for LeftoverSpoolFiles {}
+
+impl std::fmt::Display for LeftoverSpoolFiles {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "unable to delete consumed spool files")
+    }
+}
+
+async fn delete_spool_files(
+    bucket: &Bucket,
+    mut file_list: Vec<String>,
+) -> Result<(), LeftoverSpoolFiles> {
+    let mut unproductive_tries = 0;
+    loop {
+        let before_count = file_list.len();
+        let deletes = file_list.into_iter().map(|name| async {
+            let r = bucket.delete_object(&name).await;
+            (name, r)
+        });
+        let (new_file_list, errors): (Vec<_>, Vec<_>) = join_all(deletes)
+            .await
+            .into_iter()
+            .filter_map(|(name, r)| match r {
+                Ok(_) => None,
+                Err(e) => Some((name, e)),
+            })
+            .unzip();
+        if errors.is_empty() {
+            break;
+        }
+        let after_count = errors.len();
+        if after_count == before_count {
+            unproductive_tries += 1;
+            if unproductive_tries == 2 {
+                log::error!("Still cannot delete these spool files after multiple attempts:");
+                for (name, err) in new_file_list.iter().zip(errors) {
+                    log::error!("delete {}: {}", name, err);
+                }
+                return Err(LeftoverSpoolFiles);
+            }
+        }
+        log::warn!("Error deleting {}/{} files", after_count, before_count);
+        file_list = new_file_list;
+        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+    }
+    Ok(())
+}
+
 async fn build(
     src_bucket: &Bucket,
     dst_bucket: &Bucket,
-    when: &DateTime<Utc>,
-    file_list: &[String],
+    when: DateTime<Utc>,
+    file_list: Vec<String>,
     vector_compression: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let fetches = file_list.iter().map(|name| src_bucket.get_object(name));
@@ -248,22 +299,13 @@ async fn build(
 
     dst_bucket.put_object(data_name, &datafile).await?;
     dst_bucket.put_object(index_name, &indexfile).await?;
-
-    let deletes = file_list.iter().map(|name| src_bucket.delete_object(name));
-    if let Some(err) = join_all(deletes)
-        .await
-        .into_iter()
-        .filter_map(|r| r.err())
-        .next()
-    {
-        return Err(Box::new(err));
-    }
-
+    delete_spool_files(src_bucket, file_list).await?;
     Ok(())
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::init();
     let args: Vec<_> = env::args_os().collect();
     if args.len() != 5 {
         eprintln!(
@@ -289,7 +331,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let batches = find_batches(&src_bucket).await?;
     let now = Utc::now();
     let mut success = true;
-    for (when, file_list) in batches.iter() {
+    for (when, file_list) in batches.into_iter() {
         let age = (now - when).num_hours();
         if age < 36 {
             // 12 hours after the end of that day
