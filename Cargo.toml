@@ -19,6 +19,7 @@ futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
 lru = "0.12"
 openssl = { version = "0.10", features = ["vendored"] }  # for musl build
+prometheus = "0.13"
 prost = "0.13"
 prost-types = "0.13"
 regex = "1.10"

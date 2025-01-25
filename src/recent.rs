@@ -1,6 +1,7 @@
 use async_stream::stream;
 use comprehensive::health::HealthSignaller;
 use futures::Stream;
+use prometheus::{register_int_counter, register_int_gauge};
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
@@ -209,7 +210,8 @@ pub struct RecentDatabase {
     b: [RwLock<Bucket>; NBUCKETS],
 
     // Both fresh and the ring buffer
-    count: AtomicUsize,
+    count_metric: prometheus::IntGauge,
+    total_metric: prometheus::IntCounter,
 
     // The erliest time for which we will receive queries.
     // Any earlier will go to the archive.
@@ -248,7 +250,16 @@ impl RecentDatabase {
             oldest_i: AtomicUsize::new(0),
             newest_i: AtomicUsize::new(0),
             b: array_init::array_init(|_| RwLock::new(Bucket::new())),
-            count: AtomicUsize::new(0),
+            count_metric: register_int_gauge!(
+                "recent_td_events_cached",
+                "Number of cached TDFrame events"
+            )
+            .unwrap(),
+            total_metric: register_int_counter!(
+                "recent_td_events_total",
+                "Total number of TDFrame events"
+            )
+            .unwrap(),
             start_time: AtomicI64::new(0),
         }
     }
@@ -276,7 +287,8 @@ impl RecentDatabase {
             }
         }
         fresh.v.push(frame);
-        self.count.fetch_add(1, Ordering::Relaxed);
+        self.count_metric.inc();
+        self.total_metric.inc();
     }
 
     async fn expire(&self) {
@@ -311,7 +323,9 @@ impl RecentDatabase {
                 break;
             }
             let mut b = self.b[i].write().await;
-            self.count.fetch_sub(b.v.len(), Ordering::Relaxed);
+            if let Ok(delta) = b.v.len().try_into() {
+                self.count_metric.sub(delta);
+            }
             b.v = Vec::new();
             b.t0 = 0;
             b.t1 = 0;
@@ -367,7 +381,7 @@ impl RecentDatabase {
     async fn report(&self) {
         let i0 = self.delete_i.load(Ordering::Relaxed);
         let i1 = self.newest_i.load(Ordering::Relaxed);
-        let count = self.count.load(Ordering::Relaxed);
+        let count = self.count_metric.get();
         let bucket_count = i1 + 1 + if i1 >= i0 { 0 } else { NBUCKETS } - i0;
         let fresh_count = self.fresh.read().await.v.count();
         log::info!(
@@ -429,7 +443,7 @@ impl RecentDatabase {
     pub fn start(
         self: Arc<Self>,
         mut live_feed: td_feed_client::TdFeedClient<comprehensive_grpc::client::Channel>,
-        ht: HealthSignaller
+        ht: HealthSignaller,
     ) {
         let self_live_getter = self.clone();
         tokio::spawn(async move {
