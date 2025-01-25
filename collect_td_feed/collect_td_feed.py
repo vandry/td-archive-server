@@ -4,6 +4,9 @@ from concurrent import futures
 import boto3
 import datetime
 import grpc
+from grpc_health.v1 import health
+from grpc_health.v1 import health_pb2
+from grpc_health.v1 import health_pb2_grpc
 import io
 import json
 import logging
@@ -195,6 +198,9 @@ def main():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))
     feed = TDFeed(credentials_filename)
     td_feed_pb2_grpc.add_TDFeedServicer_to_server(feed, server)
+    hs = health.HealthServicer()
+    health_pb2_grpc.add_HealthServicer_to_server(hs, server)
+    hs.set('ready', health_pb2.HealthCheckResponse.NOT_SERVING)
     port = '[::]:3000'
     server.add_insecure_port(port)
     server.start()
@@ -205,6 +211,7 @@ def main():
     while True:
         feed_conn = feed.start()
         while feed_conn.is_connected():
+            hs.set('ready', health_pb2.HealthCheckResponse.SERVING)
             time.sleep(10)
             now = time.time()
             elapsed = now - interval_start
@@ -214,6 +221,7 @@ def main():
                 logging.warn('Have %d subscribers and sent %f messages/second', len(feed.subscribers), count/elapsed)
                 interval_start = now
                 saver.flush()
+        hs.set('ready', health_pb2.HealthCheckResponse.NOT_SERVING)
         logging.error('Need to reconnect')
 
 

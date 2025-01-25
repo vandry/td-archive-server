@@ -1,7 +1,8 @@
 use atomic_take::AtomicTake;
 use chrono::{TimeZone, Utc};
 use comprehensive::health::{HealthReporter, HealthSignaller};
-use comprehensive::{Resource, ResourceDependencies};
+use comprehensive::{NoArgs, Resource, ResourceDependencies};
+use comprehensive_grpc::GrpcClient;
 use futures::stream::{self, Stream, StreamExt};
 use s3::error::S3Error;
 use s3::Bucket;
@@ -10,13 +11,12 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tonic::transport::Uri;
 use tonic::{Code, Request, Response, Status};
 
 use crate::TDArchiveBucket;
 use crate::archive::IndexRepo;
 use crate::common::{archive_filenames, now_time_t};
-use crate::openraildata_pb::{td_feed_server, TdQuery};
+use crate::openraildata_pb::{td_feed_client, td_feed_server, TdQuery};
 use crate::preserve;
 use crate::recent::RecentDatabase;
 
@@ -151,19 +151,19 @@ impl td_feed_server::TdFeed for TDArchiveFeedResource {
     }
 }
 
+#[derive(GrpcClient)]
+struct LiveFeed(
+    td_feed_client::TdFeedClient<comprehensive_grpc::client::Channel>,
+    comprehensive_grpc::client::ClientWorker,
+);
+
 pub struct TDArchiveFeedResource {
     bucket: Arc<TDArchiveBucket>,
     repo: Arc<IndexRepo>,
     recent: Arc<RecentDatabase>,
     tdfeed: TDArchiveFeed,
-    live_feed_address: Uri,
+    live_feed: Arc<LiveFeed>,
     signaller: AtomicTake<HealthSignaller>,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct Args {
-    #[arg(long)]
-    live_feed_address: Uri,
 }
 
 #[derive(ResourceDependencies)]
@@ -171,16 +171,17 @@ pub struct TDArchiveFeedResourceDependencies {
     health_reporter: Arc<HealthReporter>,
     bucket: Arc<TDArchiveBucket>,
     repo: Arc<IndexRepo>,
+    live_feed: Arc<LiveFeed>,
 }
 
 impl Resource for TDArchiveFeedResource {
-    type Args = Args;
+    type Args = NoArgs;
     type Dependencies = TDArchiveFeedResourceDependencies;
     const NAME: &str = "TDArchiveFeed";
 
     fn new(
         d: TDArchiveFeedResourceDependencies,
-        args: Args,
+        _: NoArgs,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let recent = Arc::new(RecentDatabase::new());
         let tdfeed = TDArchiveFeed::new(recent.clone());
@@ -189,7 +190,7 @@ impl Resource for TDArchiveFeedResource {
             repo: d.repo,
             recent,
             tdfeed,
-            live_feed_address: args.live_feed_address,
+            live_feed: d.live_feed,
             bucket: d.bucket,
             signaller: AtomicTake::new(d.health_reporter.register("live")?),
         })
@@ -200,7 +201,7 @@ impl Resource for TDArchiveFeedResource {
         self.tdfeed
             .scan_boundary(self.bucket.clone())
             .await;
-        Arc::clone(&self.recent).start(self.live_feed_address.clone(), signaller);
+        Arc::clone(&self.recent).start(self.live_feed.client(), signaller);
         Ok(())
     }
 }

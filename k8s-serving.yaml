@@ -26,7 +26,7 @@ spec:
         - "--s3-endpoint=https://sos-ch-dk-2.exo.io"
         - "--s3-region-name=ch-dk-2"
         - "--bucket-name=td-archive"
-        - "--live-feed-address=http://collect-td-feed:3000"
+        - "--live-feed-uri=http://collect-td-feed:3000"
         - "--grpc-port=3001"
         - "--diag-http-port=9090"
         livenessProbe:

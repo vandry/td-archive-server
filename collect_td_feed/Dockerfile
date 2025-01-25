@@ -3,7 +3,7 @@ FROM python:3
 WORKDIR /root
 
 RUN python3 -m pip install --upgrade pip
-RUN python3 -m pip install grpcio protobuf==3.20.3 stomp-py boto3
+RUN python3 -m pip install grpcio protobuf==3.20.3 stomp-py boto3 grpcio-health-checking
 
 EXPOSE 3000
 

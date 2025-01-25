@@ -9,7 +9,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
-use tonic::transport::Uri;
 use tonic::{Request, Status};
 
 use crate::common::{intersect, now_time_t, query_matches, union};
@@ -218,13 +217,12 @@ pub struct RecentDatabase {
 }
 
 async fn get_live(
-    live_feed_address: Uri,
+    live_feed: &mut td_feed_client::TdFeedClient<comprehensive_grpc::client::Channel>,
     feed: &RecentDatabase,
     ht: &HealthSignaller,
     got_at_least_one: &mut bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = td_feed_client::TdFeedClient::connect(live_feed_address).await?;
-    let mut stream = client
+    let mut stream = live_feed
         .feed(Request::new(TdQuery::default()))
         .await?
         .into_inner();
@@ -428,13 +426,17 @@ impl RecentDatabase {
         }
     }
 
-    pub fn start(self: Arc<Self>, live_feed_address: Uri, ht: HealthSignaller) {
+    pub fn start(
+        self: Arc<Self>,
+        mut live_feed: td_feed_client::TdFeedClient<comprehensive_grpc::client::Channel>,
+        ht: HealthSignaller
+    ) {
         let self_live_getter = self.clone();
         tokio::spawn(async move {
             loop {
                 let mut got_at_least_one = false;
                 if let Err(e) = get_live(
-                    live_feed_address.clone(),
+                    &mut live_feed,
                     &self_live_getter,
                     &ht,
                     &mut got_at_least_one,
