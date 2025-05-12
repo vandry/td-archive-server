@@ -13,8 +13,9 @@ comprehensive_s3::bucket!(TDArchiveBucket, "TD storage", "");
 
 #[derive(comprehensive::ResourceDependencies)]
 struct TopDependencies {
-    _grpc_service: std::sync::Arc<server::TDArchiveFeedGrpcService>,
-    _diag: std::sync::Arc<comprehensive::diag::HttpServer>,
+    _grpc_service: std::sync::Arc<server::TDArchiveFeedResource>,
+    _server: std::sync::Arc<comprehensive_grpc::server::GrpcServer>,
+    _diag: std::sync::Arc<comprehensive_http::diag::HttpServer>,
 }
 
 #[tokio::main]

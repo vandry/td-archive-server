@@ -1,7 +1,7 @@
-use atomic_take::AtomicTake;
 use chrono::{TimeZone, Utc};
-use comprehensive::health::{HealthReporter, HealthSignaller};
-use comprehensive::{NoArgs, Resource, ResourceDependencies};
+use comprehensive::health::HealthReporter;
+use comprehensive::v1::{AssemblyRuntime, Resource, resource};
+use comprehensive::{NoArgs, ResourceDependencies};
 use comprehensive_grpc::GrpcClient;
 use futures::stream::{self, Stream, StreamExt};
 use s3::error::S3Error;
@@ -24,7 +24,7 @@ const MAX_QUERY_TIME: i64 = 86400 * 20;
 
 struct TDArchiveFeed {
     recent: Arc<RecentDatabase>,
-    boundary_time: Arc<AtomicI64>,
+    boundary_time: AtomicI64,
 }
 
 fn map_exists<T>(r: Result<T, S3Error>) -> Result<bool, S3Error> {
@@ -49,11 +49,14 @@ impl TDArchiveFeed {
     fn new(recent: Arc<RecentDatabase>) -> Self {
         Self {
             recent,
-            boundary_time: Arc::new(AtomicI64::new(0)),
+            boundary_time: AtomicI64::new(0),
         }
     }
 
-    pub async fn scan_boundary<T: AsRef<Bucket> + Send + Sync + 'static>(&self, bucket: Arc<T>) {
+    pub async fn scan_boundary<T: AsRef<Bucket> + Send + Sync + 'static>(
+        self: &Arc<Self>,
+        bucket: Arc<T>,
+    ) {
         let now = now_time_t();
         let today = now - (now % 86400);
         // The index should definitely not already be built for today,
@@ -76,16 +79,15 @@ impl TDArchiveFeed {
             "Queries for data before {}T00:00:00Z will use archive, after will use recent",
             ymd
         );
-        let published_boundary = Arc::clone(&self.boundary_time);
-        let recent = Arc::clone(&self.recent);
+        let this = Arc::clone(self);
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_millis(300000)).await;
                 match day_built(bucket.as_ref().as_ref(), boundary).await {
                     Ok(true) => {
                         boundary += 86400;
-                        published_boundary.store(boundary, Ordering::Release);
-                        recent.set_boundary(boundary);
+                        this.boundary_time.store(boundary, Ordering::Release);
+                        this.recent.set_boundary(boundary);
                         let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
                         log::info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
                     }
@@ -144,7 +146,7 @@ impl td_feed_server::TdFeed for TDArchiveFeedResource {
                 ts.seconds = boundary;
                 ts.nanos = 0;
             }
-            streams.push(Box::pin(self.recent.clone().feed(rq)));
+            streams.push(Box::pin(self.tdfeed.recent.clone().feed(rq)));
         }
         let output_stream = stream::iter(streams).flatten();
         Ok(Response::new(Box::pin(output_stream) as Self::FeedStream))
@@ -158,12 +160,8 @@ struct LiveFeed(
 );
 
 pub struct TDArchiveFeedResource {
-    bucket: Arc<TDArchiveBucket>,
     repo: Arc<IndexRepo>,
-    recent: Arc<RecentDatabase>,
-    tdfeed: TDArchiveFeed,
-    live_feed: Arc<LiveFeed>,
-    signaller: AtomicTake<HealthSignaller>,
+    tdfeed: Arc<TDArchiveFeed>,
 }
 
 #[derive(ResourceDependencies)]
@@ -174,40 +172,27 @@ pub struct TDArchiveFeedResourceDependencies {
     live_feed: Arc<LiveFeed>,
 }
 
+#[resource]
+#[export_grpc(td_feed_server::TdFeedServer)]
+#[proto_descriptor(crate::openraildata_pb::FILE_DESCRIPTOR_SET)]
 impl Resource for TDArchiveFeedResource {
-    type Args = NoArgs;
-    type Dependencies = TDArchiveFeedResourceDependencies;
-    const NAME: &str = "TDArchiveFeed";
-
     fn new(
         d: TDArchiveFeedResourceDependencies,
         _: NoArgs,
-    ) -> Result<Self, Box<dyn std::error::Error>> {
+        api: &mut AssemblyRuntime<'_>,
+    ) -> Result<Arc<Self>, Box<dyn std::error::Error>> {
         let recent = Arc::new(RecentDatabase::new());
-        let tdfeed = TDArchiveFeed::new(recent.clone());
-
-        Ok(Self {
+        let tdfeed = Arc::new(TDArchiveFeed::new(recent));
+        let signaller = d.health_reporter.register("live")?;
+        let tdfeed2 = Arc::clone(&tdfeed);
+        api.set_task(async move {
+            tdfeed2.scan_boundary(d.bucket).await;
+            Arc::clone(&tdfeed2.recent).start(d.live_feed.client(), signaller);
+            Ok(())
+        });
+        Ok(Arc::new(Self {
             repo: d.repo,
-            recent,
             tdfeed,
-            live_feed: d.live_feed,
-            bucket: d.bucket,
-            signaller: AtomicTake::new(d.health_reporter.register("live")?),
-        })
-    }
-
-    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let signaller = self.signaller.take().unwrap();
-        self.tdfeed
-            .scan_boundary(self.bucket.clone())
-            .await;
-        Arc::clone(&self.recent).start(self.live_feed.client(), signaller);
-        Ok(())
+        }))
     }
 }
-
-#[derive(comprehensive_grpc::GrpcService)]
-#[implementation(TDArchiveFeedResource)]
-#[service(td_feed_server::TdFeedServer)]
-#[descriptor(crate::openraildata_pb::FILE_DESCRIPTOR_SET)]
-pub struct TDArchiveFeedGrpcService;
