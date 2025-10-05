@@ -12,9 +12,10 @@ chrono = "0.4"
 env_logger = "0.11.8"
 clap = { version = "4.5", features = ["derive"] }
 comprehensive = { version = "0.7.4" }
-comprehensive_grpc = { version = "0.7.2" }
-comprehensive_http = { version = "0.2.0" }
+comprehensive_grpc = { version = "0.7.2", features = ["tls"] }
+comprehensive_http = { version = "0.2.0", features = ["tls"] }
 comprehensive_s3 = { version = "0.1" }
+comprehensive_spiffe = { version = "0.2.1" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
 lru = "0.12"

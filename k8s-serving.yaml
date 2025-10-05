@@ -17,6 +17,8 @@ spec:
         prometheus.io/path: /metrics
         prometheus.io/port: "9090"
         prometheus.io/scrape: "true"
+        server-diag-port: "1444"
+        server-identity: spiffe://vandry.org/ns/default/pod-label/app/td-archive-server
     spec:
       containers:
       - name: td-archive-server
@@ -28,6 +30,8 @@ spec:
         - "--bucket-name=td-archive"
         - "--live-feed-uri=http://collect-td-feed:3000"
         - "--grpc-port=3001"
+        - "--grpcs-port=1443"
+        - "--diag-https-port=1444"
         - "--diag-http-port=9090"
         livenessProbe:
           grpc:
@@ -41,16 +45,27 @@ spec:
           - name: s3-credentials
             readOnly: true
             mountPath: "/root/.aws"
+          - name: spire-agent-socket
+            mountPath: /run/spire/sockets
+            readOnly: true
         ports:
         - containerPort: 3001
         - containerPort: 9090
+        - containerPort: 1443
+        - containerPort: 1444
         env:
         - name: RUST_LOG
           value: info
+        - name: SPIFFE_ENDPOINT_SOCKET
+          value: unix:///run/spire/sockets/agent.sock
       volumes:
         - name: s3-credentials
           secret:
             secretName: s3.credentials
+        - name: spire-agent-socket
+          hostPath:
+            path: /run/spire/sockets
+            type: Directory
       restartPolicy: Always
 ---
 apiVersion: v1

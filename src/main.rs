@@ -16,6 +16,7 @@ struct TopDependencies {
     _grpc_service: std::sync::Arc<server::TDArchiveFeedResource>,
     _server: std::sync::Arc<comprehensive_grpc::server::GrpcServer>,
     _diag: std::sync::Arc<comprehensive_http::diag::HttpServer>,
+    _spiffe: std::marker::PhantomData<comprehensive_spiffe::SpiffeTlsProvider>,
 }
 
 #[tokio::main]
