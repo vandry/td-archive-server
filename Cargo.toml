@@ -9,11 +9,11 @@ async-stream = "0.3"
 boxcar = "0.2"
 bytes = "1.6"
 chrono = "0.4"
-env_logger = "0.10"
+env_logger = "0.11.8"
 clap = { version = "4.5", features = ["derive"] }
-comprehensive = { version = "0.6" }
-comprehensive_grpc = { version = "0.6" }
-comprehensive_http = { version = "0.1" }
+comprehensive = { version = "0.7.4" }
+comprehensive_grpc = { version = "0.7.2" }
+comprehensive_http = { version = "0.2.0" }
 comprehensive_s3 = { version = "0.1" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
 log = "0.4"
