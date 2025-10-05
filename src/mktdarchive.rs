@@ -10,6 +10,7 @@ use s3::Region;
 use std::collections::HashMap;
 use std::env;
 use std::io::Write;
+use tokio::sync::Semaphore;
 use xz::write::XzEncoder;
 
 mod openraildata_pb {
@@ -106,7 +107,7 @@ impl<'a> Iterator for LenBlobFileIterator<'a> {
     }
 }
 
-fn iter_len_blob_file(obj: &ResponseData) -> LenBlobFileIterator {
+fn iter_len_blob_file(obj: &ResponseData) -> LenBlobFileIterator<'_> {
     LenBlobFileIterator {
         contents: obj.as_slice(),
         pos: 0,
@@ -175,6 +176,8 @@ async fn delete_spool_files(
     Ok(())
 }
 
+static CONCURRENCY: Semaphore = Semaphore::const_new(40);
+
 async fn build(
     src_bucket: &Bucket,
     dst_bucket: &Bucket,
@@ -182,7 +185,10 @@ async fn build(
     file_list: Vec<String>,
     vector_compression: usize,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let fetches = file_list.iter().map(|name| src_bucket.get_object(name));
+    let fetches = file_list.iter().map(|name| async move {
+        let _permit = CONCURRENCY.acquire().await.unwrap();
+        src_bucket.get_object(name).await
+    });
     let maps = join_all(fetches)
         .await
         .into_iter()
