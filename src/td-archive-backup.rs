@@ -10,33 +10,25 @@ use s3::Region;
 use std::env;
 use std::path::{Path, PathBuf};
 
-async fn list_bucket(bucket: &Bucket) -> Result<Vec<Object>, Box<dyn std::error::Error>> {
+async fn list_bucket(
+    bucket: &Bucket,
+) -> Result<impl Iterator<Item = Object>, Box<dyn std::error::Error>> {
     let entries = bucket
         .list(String::from(""), Some(String::from("")))
         .await?;
-    if entries.len() != 1 {
+    if entries.iter().any(|e| e.name != bucket.name()) {
         return Err(Box::from(format!(
-            "Listing bucket {}, expected 1 result, got {}",
+            "Listing bucket {} returned at least one result for a different bucket",
             bucket.name(),
-            entries.len()
         )));
     }
-    let entry0 = entries.into_iter().next().unwrap();
-    if entry0.name != bucket.name() {
+    if entries.iter().any(|e| e.contents.is_empty()) {
         return Err(Box::from(format!(
-            "Listing bucket {}, expected 1 result with name {}, got name {}",
+            "Listing bucket {} returned at least one empty result",
             bucket.name(),
-            bucket.name(),
-            entry0.name
         )));
     }
-    if entry0.is_truncated {
-        return Err(Box::from("Got unsupported truncated result"));
-    }
-    if entry0.contents.is_empty() {
-        return Err(Box::from("Suspicious: empty bucket"));
-    }
-    Ok(entry0.contents)
+    Ok(entries.into_iter().flat_map(|e| e.contents.into_iter()))
 }
 
 fn safe_name(name: &str) -> bool {
