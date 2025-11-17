@@ -11,6 +11,7 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_stream::StreamExt;
 use tonic::{Request, Status};
+use tracing::{error, info, warn};
 
 use crate::common::{intersect, now_time_t, query_matches, union};
 use crate::openraildata_pb::{td_feed_client, TdQuery};
@@ -295,7 +296,7 @@ impl RecentDatabase {
         let mut expire_cutoff = self.start_time.load(Ordering::Acquire);
         let max_expire_cutoff: i64 = now_time_t() - MAX_KEEP_TIME;
         if expire_cutoff < max_expire_cutoff {
-            log::warn!(
+            warn!(
                 "Expire cutoff {} is earlier than acceptable {}, capping to the latter",
                 expire_cutoff,
                 max_expire_cutoff
@@ -350,7 +351,7 @@ impl RecentDatabase {
         // Get a new unused bucket.
         let new_i = (self.newest_i.load(Ordering::Acquire) + 1) % NBUCKETS;
         if self.delete_i.load(Ordering::Acquire) == new_i {
-            log::error!("Ring buffer overflow: position {} not deleted yet", new_i);
+            error!("Ring buffer overflow: position {} not deleted yet", new_i);
             return;
         }
         let bb = &self.b[new_i];
@@ -384,7 +385,7 @@ impl RecentDatabase {
         let count = self.count_metric.get();
         let bucket_count = i1 + 1 + if i1 >= i0 { 0 } else { NBUCKETS } - i0;
         let fresh_count = self.fresh.read().await.v.count();
-        log::info!(
+        info!(
             "Holding {} entries in {}/{} buckets of ring buffer plus {} fresh entries",
             count,
             bucket_count,
@@ -457,7 +458,7 @@ impl RecentDatabase {
                 )
                 .await
                 {
-                    log::error!("Getting live feed: {}", e);
+                    error!("Getting live feed: {}", e);
                 }
                 if !got_at_least_one {
                     ht.set_healthy(false);

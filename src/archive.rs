@@ -1,7 +1,8 @@
 use async_stream::stream;
 use bytes::Bytes;
 use chrono::{TimeZone, Utc};
-use comprehensive::{NoArgs, Resource, ResourceDependencies};
+use comprehensive::{NoArgs, ResourceDependencies};
+use comprehensive::v1::{AssemblyRuntime, Resource, resource};
 use futures::future::join_all;
 use futures::Stream;
 use lru::LruCache;
@@ -18,6 +19,7 @@ use std::time::Instant;
 use tokio::sync::OnceCell;
 use tokio::time::{sleep, Duration};
 use tonic::Status;
+use tracing::{error, info};
 use xz::read::XzDecoder;
 
 use crate::TDArchiveBucket;
@@ -59,7 +61,7 @@ struct IndexReader {
 
 impl Drop for IndexReader {
     fn drop(&mut self) {
-        log::info!(
+        info!(
             "Unloaded {}",
             Utc.timestamp_opt(self.start_time, 0)
                 .unwrap()
@@ -148,7 +150,7 @@ impl IndexReader {
         let nvectors: usize =
             ret.area_ids.len() + ret.descriptions.iter().map(|h| h.len()).sum::<usize>();
         ret.memory_estimate = 4 * ret.frame_offsets.len() + veclen * nvectors + actual_data_length;
-        log::info!(
+        info!(
             "Loaded {}",
             Utc.timestamp_opt(day, 0).unwrap().format("%Y-%m-%d")
         );
@@ -304,34 +306,39 @@ pub struct IndexRepo {
 #[derive(ResourceDependencies)]
 pub struct IndexRepoDependencies(Arc<TDArchiveBucket>);
 
+#[resource]
 impl Resource for IndexRepo {
     type Args = NoArgs;
     type Dependencies = IndexRepoDependencies;
     const NAME: &str = "TD Archive";
 
-    fn new(d: IndexRepoDependencies, _: NoArgs) -> Result<Self, Box<dyn std::error::Error>> {
-        Ok(Self {
+    fn new(
+        d: IndexRepoDependencies,
+        _: NoArgs,
+        api: &mut AssemblyRuntime<'_>,
+    ) -> Result<Arc<Self>, std::convert::Infallible> {
+        let shared = Arc::new(Self {
             bucket: d.0,
             cache: Mutex::new(LruCache::new(NonZeroUsize::new(100).unwrap())),
-        })
-    }
-
-    async fn run(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let mut infolog = Instant::now();
-        loop {
-            let (count, memory_estimate) = self.get_stats();
-            if infolog.elapsed().as_secs() >= 600 {
-                log::info!(
-                    "Caching {} days using at least {} bytes of memory",
-                    count,
-                    memory_estimate
-                );
-                infolog = Instant::now();
+        });
+        let shared2 = Arc::clone(&shared);
+        api.set_task(async move {
+            let mut infolog = Instant::now();
+            loop {
+                let (count, memory_estimate) = shared2.get_stats();
+                if infolog.elapsed().as_secs() >= 600 {
+                    info!(
+                        "Caching {} days using at least {} bytes of memory",
+                        count,
+                        memory_estimate
+                    );
+                    infolog = Instant::now();
+                }
+                sleep(Duration::from_millis(10000)).await;
             }
-            sleep(Duration::from_millis(10000)).await;
-        }
+        });
+        Ok(shared)
     }
-
 }
 
 impl IndexRepo {
@@ -347,7 +354,7 @@ impl IndexRepo {
                 match IndexReader::load(self.bucket.as_ref().as_ref(), day).await {
                     Ok(r) => IndexRepoEntry::Entry(Arc::new(r)),
                     Err(e) => {
-                        log::error!(
+                        error!(
                             "Unable to load data for {}: {}",
                             Utc.timestamp_opt(day, 0).unwrap().format("%Y-%m-%d"),
                             e

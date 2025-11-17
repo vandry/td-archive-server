@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tonic::{Code, Request, Response, Status};
+use tracing::{error, info};
 
 use crate::TDArchiveBucket;
 use crate::archive::IndexRepo;
@@ -69,13 +70,13 @@ impl TDArchiveFeed {
             }
             Ok(false) => (),
             Err(e) => {
-                log::error!("Error querying bucket: {}; will try again", e);
+                error!("Error querying bucket: {}; will try again", e);
             }
         }
         self.boundary_time.store(boundary, Ordering::Release);
         self.recent.set_boundary(boundary);
         let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
-        log::info!(
+        info!(
             "Queries for data before {}T00:00:00Z will use archive, after will use recent",
             ymd
         );
@@ -89,11 +90,11 @@ impl TDArchiveFeed {
                         this.boundary_time.store(boundary, Ordering::Release);
                         this.recent.set_boundary(boundary);
                         let ymd = Utc.timestamp_opt(boundary, 0).unwrap().format("%Y-%m-%d");
-                        log::info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
+                        info!("New boundary: Queries for data before {}T00:00:00Z will use archive, after will use recent", ymd);
                     }
                     Ok(false) => (),
                     Err(e) => {
-                        log::error!("Error querying bucket: {}; will try again", e);
+                        error!("Error querying bucket: {}; will try again", e);
                     }
                 }
             }

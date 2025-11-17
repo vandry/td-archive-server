@@ -9,29 +9,30 @@ async-stream = "0.3"
 boxcar = "0.2"
 bytes = "1.6"
 chrono = "0.4"
-env_logger = "0.11.8"
 clap = { version = "4.5", features = ["derive"] }
-comprehensive = { version = "0.7.4" }
-comprehensive_grpc = { version = "0.7.2", features = ["tls"] }
-comprehensive_http = { version = "0.2.0", features = ["tls"] }
-comprehensive_s3 = { version = "0.1" }
-comprehensive_spiffe = { version = "0.2.1" }
+comprehensive = { version = "0.9" }
+comprehensive_grpc = { version = "0.9", features = ["tls"] }
+comprehensive_http = { version = "0.4", features = ["tls"] }
+comprehensive_s3 = { version = "0.3" }
+comprehensive_spiffe = { version = "0.4" }
 futures = { version = "0.3", default-features = false, features = ["alloc"] }
-log = "0.4"
 lru = "0.12"
 openssl = { version = "0.10", features = ["vendored"] }  # for musl build
-prometheus = "0.13"
-prost = "0.13"
-prost-types = "0.13"
+prometheus = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 regex = "1.10"
-rust-s3 = "0.35"
+rust-s3 = "0.37"
 tokio = { version = "1.0", features = ["macros", "rt-multi-thread", "signal"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-tonic = "0.12"
+tonic = "0.14"
+tonic-prost = "0.14"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 xz = "0.1"
 
 [build-dependencies]
-tonic-build = "0.12"
+tonic-prost-build = "0.14"
 
 [[bin]]
 name = "mktdarchive"

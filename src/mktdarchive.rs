@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::env;
 use std::io::Write;
 use tokio::sync::Semaphore;
+use tracing::{error, warn};
 use xz::write::XzEncoder;
 
 mod openraildata_pb {
@@ -162,14 +163,14 @@ async fn delete_spool_files(
         if after_count == before_count {
             unproductive_tries += 1;
             if unproductive_tries == 2 {
-                log::error!("Still cannot delete these spool files after multiple attempts:");
+                error!("Still cannot delete these spool files after multiple attempts:");
                 for (name, err) in new_file_list.iter().zip(errors) {
-                    log::error!("delete {}: {}", name, err);
+                    error!("delete {}: {}", name, err);
                 }
                 return Err(LeftoverSpoolFiles);
             }
         }
-        log::warn!("Error deleting {}/{} files", after_count, before_count);
+        warn!("Error deleting {}/{} files", after_count, before_count);
         file_list = new_file_list;
         tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
     }
@@ -311,7 +312,10 @@ async fn build(
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::init();
+    tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .init();
     let args: Vec<_> = env::args_os().collect();
     if args.len() != 5 {
         eprintln!(
